@@ -1,0 +1,11 @@
+[package]
+name = "clipvault"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arboard = "3.6.1"
+chrono = "0.4.45"
+dirs = "6.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
