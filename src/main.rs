@@ -1,16 +1,8 @@
 use arboard::Clipboard;
+use clipvault::{Result, poll};
 
-fn main() {
-    let mut clipboard = match Clipboard::new() {
-        Ok(clipboard) => clipboard,
-        Err(e) => {
-            eprintln!("clipvault: could not open the clipboard: {e}");
-            return;
-        }
-    };
-
-    match clipboard.get_text() {
-        Ok(text) => println!("{text}"),
-        Err(e) => eprintln!("clipvault: {e}"),
-    }
+fn main() -> Result<()> {
+    let mut clipboard = Clipboard::new()?;
+    println!("{}", poll::fetch_clipboard(&mut clipboard)?);
+    Ok(())
 }

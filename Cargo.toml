@@ -3,6 +3,15 @@ name = "clipvault"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "clipvault"
+path = "src/lib.rs"
+
+# The CLI.
+[[bin]]
+name = "clipvault"
+path = "src/main.rs"
+
 [dependencies]
 arboard = "3.6.1"
 chrono = "0.4.45"
