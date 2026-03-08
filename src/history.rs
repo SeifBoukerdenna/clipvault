@@ -1,0 +1,83 @@
+//! Append-only history storage at ~/.clipvault/history.jsonl.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use crate::Result;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub id: u128,
+    pub timestamp: String,
+    pub content: String,
+}
+
+/// Resolves ~/.clipvault, creating it if needed.
+pub(crate) fn clipvault_dir() -> Result<PathBuf> {
+    let mut dir = dirs::home_dir().ok_or("could not resolve home directory")?;
+    dir.push(".clipvault");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Resolves ~/.clipvault/history.jsonl, creating the directory if needed.
+fn history_path() -> Result<PathBuf> {
+    let mut path = clipvault_dir()?;
+    path.push("history.jsonl");
+    Ok(path)
+}
+
+/// Appends one clipboard change as a single JSON line.
+/// Opens, writes, and closes the file each call — simplest and crash-safe,
+/// since we're only writing on actual changes, not every poll.
+pub fn append_history(content: &str) -> Result<()> {
+    let path = history_path()?;
+
+    // Nanos-since-epoch id: monotonic in practice, and needs no lookup
+    // of the previous entry on restart (unlike a simple incrementing counter).
+    let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+
+    let entry = HistoryEntry {
+        id,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        content: content.to_string(),
+    };
+
+    let line = serde_json::to_string(&entry)?;
+
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(file, "{line}")?;
+    Ok(())
+}
+
+/// Reads the whole history, oldest first.
+///
+/// A missing file just means nothing has been captured yet. Unparseable lines
+/// are skipped rather than fatal: a half-written final line (from a kill during
+/// a write) or a hand-edit shouldn't make the rest of the history unreadable.
+pub fn read_history() -> Result<Vec<HistoryEntry>> {
+    let path = history_path()?;
+
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut entries = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str(&line) {
+            entries.push(entry);
+        }
+    }
+
+    Ok(entries)
+}
