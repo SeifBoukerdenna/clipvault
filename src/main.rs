@@ -2,7 +2,7 @@ use std::thread;
 use std::time::Duration;
 
 use arboard::Clipboard;
-use clipvault::{Result, history, poll};
+use clipvault::{Result, display, history, poll};
 
 /// Milliseconds between clipboard polls.
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
@@ -21,8 +21,9 @@ fn main() -> Result<()> {
             continue;
         };
 
-        if let Err(e) = history::append_history(&text) {
-            eprintln!("clipvault: could not record entry: {e}");
+        match history::append_history(&text) {
+            Ok(()) => println!("  + {}", display::preview(&text, display::PREVIEW_WIDTH)),
+            Err(e) => eprintln!("clipvault: could not record entry: {e}"),
         }
     }
 }

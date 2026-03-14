@@ -1,5 +1,6 @@
 //! Shared core behind the `clipvault` CLI.
 
+pub mod display;
 pub mod history;
 pub mod poll;
 
