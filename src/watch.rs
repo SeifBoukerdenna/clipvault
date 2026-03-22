@@ -24,6 +24,11 @@ pub fn run() -> Result<()> {
         ctrlc::set_handler(move || running.store(false, Ordering::SeqCst))?;
     }
 
+    // Seed with whatever is already on the clipboard so restarting the watcher
+    // doesn't re-record content that was copied before it started. Only changes
+    // observed from here on are captured.
+    let mut last = poll::fetch_clipboard(&mut clipboard).ok();
+
     println!("clipvault watching the clipboard — Ctrl+C to stop");
 
     let mut captured = 0usize;
@@ -41,15 +46,26 @@ pub fn run() -> Result<()> {
             Err(_) => continue,
         };
 
+        if text.trim().is_empty() {
+            continue;
+        }
+
+        // Same content as last poll — the user simply hasn't copied anything new.
+        if last.as_deref() == Some(text.as_str()) {
+            continue;
+        }
+
         match history::append_history(&text) {
             Ok(()) => {
                 captured += 1;
                 println!("  + {}", display::preview(&text, display::PREVIEW_WIDTH));
             }
-            // A failed write shouldn't kill a long-running watcher. Report it
-            // and move on.
+            // A failed write shouldn't kill a long-running watcher. Report it and
+            // move on; `last` still advances so one bad entry can't spam the log.
             Err(e) => eprintln!("clipvault: could not record entry: {e}"),
         }
+
+        last = Some(text);
     }
 
     let noun = if captured == 1 { "entry" } else { "entries" };
