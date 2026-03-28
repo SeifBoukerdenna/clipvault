@@ -1,5 +1,7 @@
 //! Turns history entries into single safe terminal lines.
 
+use crate::history::HistoryEntry;
+
 /// Max width, in characters, of a rendered content preview.
 pub const PREVIEW_WIDTH: usize = 80;
 
@@ -50,4 +52,26 @@ pub fn preview(content: &str, max_chars: usize) -> String {
     }
 
     out
+}
+
+/// Renders the stored RFC 3339 timestamp in the local timezone.
+/// Falls back to the raw value so a malformed timestamp still shows its row.
+pub fn format_timestamp(raw: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(dt) => dt
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        Err(_) => raw.to_string(),
+    }
+}
+
+/// One history entry as `index  timestamp  preview`.
+pub fn format_entry(index: usize, entry: &HistoryEntry) -> String {
+    format!(
+        "{:>5}  {}  {}",
+        index,
+        format_timestamp(&entry.timestamp),
+        preview(&entry.content, PREVIEW_WIDTH),
+    )
 }
