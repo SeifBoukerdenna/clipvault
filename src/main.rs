@@ -10,6 +10,7 @@ clipvault — a clipboard history keeper
 USAGE:
     clipvault [watch]           Poll the clipboard and record every change (default)
     clipvault list [-n N]       Show the last N entries (default 20)
+    clipvault search <term>     Case-insensitive substring search across history
     clipvault help              Show this message
 
 History lives in ~/.clipvault/history.jsonl.
@@ -39,6 +40,7 @@ fn run() -> Result<()> {
     match command {
         "watch" => watch::run(),
         "list" => list(rest),
+        "search" => search(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -83,4 +85,32 @@ fn parse_count(args: &[String]) -> Result<usize> {
     }
 
     Ok(count)
+}
+
+fn search(args: &[String]) -> Result<()> {
+    let term = match args {
+        [term] => term,
+        [] => return Err("`search` needs a term, e.g. `clipvault search ssh`".into()),
+        _ => return Err("`search` takes a single term — quote it if it contains spaces".into()),
+    };
+
+    let needle = term.to_lowercase();
+    let entries = history::read_history()?;
+
+    let matches: Vec<(usize, &history::HistoryEntry)> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.content.to_lowercase().contains(&needle))
+        .collect();
+
+    if matches.is_empty() {
+        println!("no matches for '{term}'");
+        return Ok(());
+    }
+
+    for (index, entry) in matches {
+        println!("{}", display::format_entry(index + 1, entry));
+    }
+
+    Ok(())
 }
