@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use clipvault::{Result, display, history, watch};
+use clipvault::{Result, display, history, poll, watch};
 
 const DEFAULT_LIST_COUNT: usize = 20;
 
@@ -11,9 +11,12 @@ USAGE:
     clipvault [watch]           Poll the clipboard and record every change (default)
     clipvault list [-n N]       Show the last N entries (default 20)
     clipvault search <term>     Case-insensitive substring search across history
+    clipvault copy <index>      Put a past entry back on the clipboard
     clipvault help              Show this message
 
-History lives in ~/.clipvault/history.jsonl.
+History lives in ~/.clipvault/history.jsonl. Indices shown by `list` and
+`search` are absolute positions in that file, so they stay valid as new
+entries arrive and can be passed straight to `copy`.
 
 The menu bar app (ClipVault.app) watches and reads the same file. Build it
 with ./scripts/bundle.sh --install, then press Cmd+Shift+V for the history.
@@ -41,6 +44,7 @@ fn run() -> Result<()> {
         "watch" => watch::run(),
         "list" => list(rest),
         "search" => search(rest),
+        "copy" => copy(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -111,6 +115,35 @@ fn search(args: &[String]) -> Result<()> {
     for (index, entry) in matches {
         println!("{}", display::format_entry(index + 1, entry));
     }
+
+    Ok(())
+}
+
+fn copy(args: &[String]) -> Result<()> {
+    let raw = match args {
+        [index] => index,
+        _ => {
+            return Err(
+                "`copy` needs one index from `clipvault list`, e.g. `clipvault copy 42`".into(),
+            );
+        }
+    };
+
+    let index: usize = raw
+        .parse()
+        .map_err(|_| format!("invalid index '{raw}' — expected a whole number"))?;
+
+    let entries = history::read_history()?;
+    let entry = index
+        .checked_sub(1)
+        .and_then(|i| entries.get(i))
+        .ok_or_else(|| format!("no entry {index} — history holds {} entries", entries.len()))?;
+
+    poll::set_clipboard(&entry.content)?;
+    println!(
+        "copied {}",
+        display::preview(&entry.content, display::PREVIEW_WIDTH)
+    );
 
     Ok(())
 }
