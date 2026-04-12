@@ -16,18 +16,54 @@ pub struct HistoryEntry {
     pub content: String,
 }
 
+/// Owner-only. Clipboard history is a record of everything you have copied, so
+/// it has no business being readable by other accounts on the machine — which
+/// is what the default umask would give it.
+#[cfg(unix)]
+const OWNER_ONLY_FILE: u32 = 0o600;
+#[cfg(unix)]
+const OWNER_ONLY_DIR: u32 = 0o700;
+
+/// Tightens permissions on a path we own, if they aren't already tight.
+///
+/// Applied on every write rather than only at creation, so files left behind by
+/// an older version get repaired instead of staying world-readable forever.
+#[cfg(unix)]
+pub(crate) fn restrict(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    if metadata.permissions().mode() & 0o777 == mode {
+        return;
+    }
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+}
+
+#[cfg(not(unix))]
+pub(crate) fn restrict(_path: &std::path::Path, _mode: u32) {}
+
 /// Resolves ~/.clipvault, creating it if needed.
 pub(crate) fn clipvault_dir() -> Result<PathBuf> {
     let mut dir = dirs::home_dir().ok_or("could not resolve home directory")?;
     dir.push(".clipvault");
     fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    restrict(&dir, OWNER_ONLY_DIR);
     Ok(dir)
 }
 
 /// Resolves ~/.clipvault/history.jsonl, creating the directory if needed.
+///
+/// Permissions are repaired here rather than only on write, so a file left
+/// world-readable by an older version is tightened by any operation — including
+/// a plain `list` — instead of waiting for the next copy.
 fn history_path() -> Result<PathBuf> {
     let mut path = clipvault_dir()?;
     path.push("history.jsonl");
+    #[cfg(unix)]
+    restrict(&path, OWNER_ONLY_FILE);
     Ok(path)
 }
 
@@ -50,6 +86,11 @@ pub fn append_history(content: &str) -> Result<()> {
     let line = serde_json::to_string(&entry)?;
 
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    // Again after creation: the path resolution above ran before the file
+    // existed on the very first capture.
+    #[cfg(unix)]
+    restrict(&path, OWNER_ONLY_FILE);
+
     writeln!(file, "{line}")?;
     Ok(())
 }
@@ -80,4 +121,37 @@ pub fn read_history() -> Result<Vec<HistoryEntry>> {
     }
 
     Ok(entries)
+}
+
+#[cfg(all(test, unix))]
+mod permission_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode_of(path: &std::path::Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn restrict_tightens_a_world_readable_file() {
+        let path = std::env::temp_dir().join(format!("cv-perm-{}", std::process::id()));
+        fs::write(&path, b"secret").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(mode_of(&path), 0o644);
+
+        // The repair path: a file left behind by an older version.
+        restrict(&path, 0o600);
+        assert_eq!(mode_of(&path), 0o600);
+
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn restrict_is_a_no_op_on_a_missing_path() {
+        // Runs on every write, including before the file exists.
+        restrict(
+            std::path::Path::new("/nonexistent/clipvault/history.jsonl"),
+            0o600,
+        );
+    }
 }
