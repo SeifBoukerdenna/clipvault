@@ -11,6 +11,12 @@ use crate::{Result, display, history, poll};
 /// Milliseconds between clipboard polls.
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 
+/// Entries kept on disk; older ones are pruned as new ones arrive.
+const HISTORY_LIMIT: usize = 1000;
+
+/// Captures between prunes.
+const PRUNE_EVERY_CAPTURES: u32 = 25;
+
 /// Slice length for the interruptible sleep, so Ctrl+C is acted on promptly
 /// instead of after a full poll interval.
 const TICK: Duration = Duration::from_millis(50);
@@ -32,6 +38,12 @@ pub fn run() -> Result<()> {
     println!("clipvault watching the clipboard — Ctrl+C to stop");
 
     let mut captured = 0usize;
+    let mut since_prune = 0u32;
+
+    // Trim anything a previous run left over the limit.
+    if let Err(e) = history::prune(HISTORY_LIMIT) {
+        eprintln!("clipvault: could not prune history: {e}");
+    }
 
     while running.load(Ordering::SeqCst) {
         sleep_interruptibly(POLL_INTERVAL, &running);
@@ -59,6 +71,16 @@ pub fn run() -> Result<()> {
             Ok(()) => {
                 captured += 1;
                 println!("  + {}", display::preview(&text, display::PREVIEW_WIDTH));
+
+                // Pruning rewrites the whole file, so it runs on a cadence
+                // rather than on every capture.
+                since_prune += 1;
+                if since_prune >= PRUNE_EVERY_CAPTURES {
+                    since_prune = 0;
+                    if let Err(e) = history::prune(HISTORY_LIMIT) {
+                        eprintln!("clipvault: could not prune history: {e}");
+                    }
+                }
             }
             // A failed write shouldn't kill a long-running watcher. Report it and
             // move on; `last` still advances so one bad entry can't spam the log.

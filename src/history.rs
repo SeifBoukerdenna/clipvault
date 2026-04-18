@@ -123,6 +123,79 @@ pub fn read_history() -> Result<Vec<HistoryEntry>> {
     Ok(entries)
 }
 
+/// Deletes the whole history file.
+/// A missing file is already the desired end state, so that isn't an error.
+pub fn clear_history() -> Result<()> {
+    let path = history_path()?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Rewrites the history with `keep` applied to every entry.
+///
+/// Writes to a sibling temp file and renames over the original, so an
+/// interrupted rewrite leaves the old history intact rather than a half-written
+/// one — the whole point of the append-only format is not losing data.
+fn rewrite<F>(keep: F) -> Result<usize>
+where
+    F: Fn(&HistoryEntry) -> bool,
+{
+    let path = history_path()?;
+    let entries = read_history()?;
+
+    let kept: Vec<&HistoryEntry> = entries.iter().filter(|e| keep(e)).collect();
+    let removed = entries.len() - kept.len();
+    if removed == 0 {
+        return Ok(0);
+    }
+
+    let mut temp = path.clone();
+    temp.set_extension("jsonl.tmp");
+
+    {
+        let mut file = File::create(&temp)?;
+        for entry in kept {
+            writeln!(file, "{}", serde_json::to_string(entry)?)?;
+        }
+        file.sync_all()?;
+    }
+
+    fs::rename(&temp, &path)?;
+    #[cfg(unix)]
+    restrict(&path, OWNER_ONLY_FILE);
+    Ok(removed)
+}
+
+/// Removes every entry whose content matches, returning how many went.
+pub fn delete_entry(content: &str) -> Result<usize> {
+    rewrite(|entry| entry.content != content)
+}
+
+/// Trims the history to its newest `limit` entries. `limit` of 0 means keep
+/// everything. Returns how many were dropped.
+pub fn prune(limit: usize) -> Result<usize> {
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let total = read_history()?.len();
+    if total <= limit {
+        return Ok(0);
+    }
+
+    // `rewrite` walks entries oldest-first, so drop everything before the cut.
+    let cutoff = total - limit;
+    let seen = std::cell::Cell::new(0usize);
+    rewrite(move |_| {
+        let index = seen.get();
+        seen.set(index + 1);
+        index >= cutoff
+    })
+}
+
 #[cfg(all(test, unix))]
 mod permission_tests {
     use super::*;
