@@ -1,7 +1,7 @@
 //! Append-only history storage at ~/.clipvault/history.jsonl.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -134,6 +134,66 @@ pub fn clear_history() -> Result<()> {
     }
 }
 
+/// How much to pull per backwards step in [`read_tail`].
+const TAIL_CHUNK_BYTES: u64 = 8 * 1024;
+
+/// Reads at most `limit` entries from the end of the history, oldest first.
+///
+/// The menu only ever shows a handful of rows, and the file is append-only, so
+/// the newest entries are always at the end. Seeking backwards keeps opening
+/// the menu O(limit) instead of O(history), which matters once the log has
+/// tens of thousands of lines.
+pub fn read_tail(limit: usize) -> Result<Vec<HistoryEntry>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let path = history_path()?;
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+
+    let len = file.metadata()?.len();
+    tail_from(&mut file, len, limit)
+}
+
+/// The seek-backwards half of [`read_tail`], split out so it can be tested
+/// against an in-memory buffer instead of a real file.
+fn tail_from<R: Read + Seek>(reader: &mut R, len: u64, limit: usize) -> Result<Vec<HistoryEntry>> {
+    let mut position = len;
+    let mut tail: Vec<u8> = Vec::new();
+
+    // Buffer one line more than asked for: after a partial chunk the first line
+    // in the buffer is usually truncated, and the extra absorbs that.
+    while position > 0 && tail.iter().filter(|b| **b == b'\n').count() <= limit {
+        let step = TAIL_CHUNK_BYTES.min(position);
+        position -= step;
+
+        let mut chunk = vec![0u8; step as usize];
+        reader.seek(SeekFrom::Start(position))?;
+        reader.read_exact(&mut chunk)?;
+        chunk.append(&mut tail);
+        tail = chunk;
+    }
+
+    // A truncated leading line simply fails to parse and drops out here, as does
+    // any lossy replacement char a chunk boundary introduced mid-sequence.
+    let text = String::from_utf8_lossy(&tail);
+    let mut entries: Vec<HistoryEntry> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    if entries.len() > limit {
+        entries.drain(..entries.len() - limit);
+    }
+
+    Ok(entries)
+}
+
 /// Rewrites the history with `keep` applied to every entry.
 ///
 /// Writes to a sibling temp file and renames over the original, so an
@@ -194,6 +254,101 @@ pub fn prune(limit: usize) -> Result<usize> {
         seen.set(index + 1);
         index >= cutoff
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn line(id: u128, content: &str) -> String {
+        serde_json::to_string(&HistoryEntry {
+            id,
+            timestamp: "2026-08-19T14:00:00+00:00".into(),
+            content: content.into(),
+        })
+        .unwrap()
+            + "\n"
+    }
+
+    fn buffer(count: usize) -> Vec<u8> {
+        (0..count)
+            .map(|i| line(i as u128, &format!("entry {i}")))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    #[test]
+    fn tail_returns_the_newest_entries_oldest_first() {
+        let data = buffer(10);
+        let len = data.len() as u64;
+        let got = tail_from(&mut Cursor::new(data), len, 3).unwrap();
+
+        let contents: Vec<&str> = got.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(contents, ["entry 7", "entry 8", "entry 9"]);
+    }
+
+    #[test]
+    fn tail_handles_a_history_shorter_than_the_limit() {
+        let data = buffer(2);
+        let len = data.len() as u64;
+        let got = tail_from(&mut Cursor::new(data), len, 25).unwrap();
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn tail_of_an_empty_file_is_empty() {
+        let got = tail_from(&mut Cursor::new(Vec::new()), 0, 5).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn tail_spans_many_chunks_without_losing_or_splitting_entries() {
+        // Each entry is padded well past the chunk size so the scan has to walk
+        // backwards several times and stitch partial lines together.
+        let padded: String = (0..40)
+            .map(|i| line(i, &format!("{}{}", "x".repeat(900), i)))
+            .collect();
+        let data = padded.into_bytes();
+        assert!(
+            data.len() as u64 > TAIL_CHUNK_BYTES * 3,
+            "test needs multiple chunks"
+        );
+
+        let len = data.len() as u64;
+        let got = tail_from(&mut Cursor::new(data), len, 5).unwrap();
+
+        assert_eq!(got.len(), 5);
+        assert!(got[4].content.ends_with("39"));
+        assert!(got[0].content.ends_with("35"));
+    }
+
+    #[test]
+    fn tail_skips_a_partial_line_left_by_a_chunk_boundary() {
+        // What the backwards scan actually sees when it lands mid-line: a JSON
+        // fragment terminated by the newline of the line it was cut out of.
+        let mut data = b"{\"id\":0,\"timesta\n".to_vec();
+        data.extend_from_slice(&buffer(3));
+        let len = data.len() as u64;
+
+        let got = tail_from(&mut Cursor::new(data), len, 10).unwrap();
+        assert_eq!(
+            got.len(),
+            3,
+            "the fragment should drop, the 3 whole lines stay"
+        );
+    }
+
+    #[test]
+    fn tail_skips_a_final_line_left_half_written_by_a_kill() {
+        let mut data = buffer(3);
+        data.extend_from_slice(b"{\"id\":99,\"timestamp\":\"2026");
+        let len = data.len() as u64;
+
+        let got = tail_from(&mut Cursor::new(data), len, 10).unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[2].content, "entry 2");
+    }
 }
 
 #[cfg(all(test, unix))]
