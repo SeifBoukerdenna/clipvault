@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use arboard::Clipboard;
 
-use crate::{Result, display, history, poll};
+use crate::{Result, display, history, lock, poll};
 
 /// Milliseconds between clipboard polls.
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
@@ -22,6 +22,16 @@ const PRUNE_EVERY_CAPTURES: u32 = 25;
 const TICK: Duration = Duration::from_millis(50);
 
 pub fn run() -> Result<()> {
+    // The menu bar app polls the same clipboard into the same file. Without
+    // this, running both records every copy twice.
+    let Some(_instance) = lock::acquire()? else {
+        return Err(
+            "clipvault is already watching (the menu bar app, or another \
+                    `clipvault watch`) — only one watcher can run at a time"
+                .into(),
+        );
+    };
+
     let mut clipboard = Clipboard::new()?;
 
     let running = Arc::new(AtomicBool::new(true));

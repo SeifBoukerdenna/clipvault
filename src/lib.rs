@@ -2,6 +2,7 @@
 
 pub mod display;
 pub mod history;
+pub mod lock;
 pub mod poll;
 pub mod watch;
 
