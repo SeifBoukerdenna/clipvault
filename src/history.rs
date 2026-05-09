@@ -8,12 +8,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::source::Source;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub id: u128,
     pub timestamp: String,
     pub content: String,
+    /// Name of the app that was frontmost at capture time. Optional so entries
+    /// written before source tracking existed still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Bundle id of that app, used to look up its icon for the menu.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bundle_id: Option<String>,
 }
 
 /// Owner-only. Clipboard history is a record of everything you have copied, so
@@ -70,7 +78,7 @@ fn history_path() -> Result<PathBuf> {
 /// Appends one clipboard change as a single JSON line.
 /// Opens, writes, and closes the file each call — simplest and crash-safe,
 /// since we're only writing on actual changes, not every poll.
-pub fn append_history(content: &str) -> Result<()> {
+pub fn append_history(content: &str, source: Option<&Source>) -> Result<()> {
     let path = history_path()?;
 
     // Nanos-since-epoch id: monotonic in practice, and needs no lookup
@@ -81,6 +89,8 @@ pub fn append_history(content: &str) -> Result<()> {
         id,
         timestamp: chrono::Utc::now().to_rfc3339(),
         content: content.to_string(),
+        source: source.and_then(|s| s.name.clone()),
+        source_bundle_id: source.and_then(|s| s.bundle_id.clone()),
     };
 
     let line = serde_json::to_string(&entry)?;
@@ -266,6 +276,8 @@ mod tests {
             id,
             timestamp: "2026-08-19T14:00:00+00:00".into(),
             content: content.into(),
+            source: None,
+            source_bundle_id: None,
         })
         .unwrap()
             + "\n"
@@ -348,6 +360,29 @@ mod tests {
         let got = tail_from(&mut Cursor::new(data), len, 10).unwrap();
         assert_eq!(got.len(), 3);
         assert_eq!(got[2].content, "entry 2");
+    }
+
+    #[test]
+    fn entries_without_a_source_still_deserialize() {
+        // Lines written before source tracking existed must keep working.
+        let old = r#"{"id":1,"timestamp":"2026-08-19T14:00:00+00:00","content":"hi"}"#;
+        let entry: HistoryEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(entry.content, "hi");
+        assert!(entry.source.is_none());
+        assert!(entry.source_bundle_id.is_none());
+    }
+
+    #[test]
+    fn a_source_free_entry_does_not_serialize_null_fields() {
+        let json = serde_json::to_string(&HistoryEntry {
+            id: 1,
+            timestamp: "t".into(),
+            content: "c".into(),
+            source: None,
+            source_bundle_id: None,
+        })
+        .unwrap();
+        assert!(!json.contains("source"), "unexpected: {json}");
     }
 }
 

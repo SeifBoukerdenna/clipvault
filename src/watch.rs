@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use arboard::Clipboard;
 
-use crate::{Result, display, history, lock, poll};
+use crate::{Result, display, history, lock, poll, source};
 
 /// Milliseconds between clipboard polls.
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
@@ -77,7 +77,7 @@ pub fn run() -> Result<()> {
             continue;
         }
 
-        match history::append_history(&text) {
+        match history::append_history(&text, source::frontmost().as_ref()) {
             Ok(()) => {
                 captured += 1;
                 println!("  + {}", display::preview(&text, display::PREVIEW_WIDTH));
