@@ -34,7 +34,7 @@ use objc2_foundation::{NSSize, NSString, NSTimer};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::history::HistoryEntry;
-use crate::{Result, display, history, hotkey, lock, poll, source};
+use crate::{Result, display, history, hotkey, lock, pins, poll, source};
 
 /// Milliseconds between clipboard polls.
 const POLL_INTERVAL_MS: u64 = 750;
@@ -212,6 +212,8 @@ enum TopItem {
     /// A disabled section header.
     #[allow(dead_code)]
     Label(MenuItem),
+    #[allow(dead_code)]
+    Separator(PredefinedMenuItem),
 }
 
 struct App {
@@ -235,6 +237,7 @@ struct App {
     captures_since_prune: u32,
     poll_every_ticks: u32,
 
+    pin_item: MenuItem,
     delete_item: MenuItem,
     login_item: CheckMenuItem,
     clear_item: MenuItem,
@@ -279,6 +282,11 @@ impl App {
             supports_subtitles: supports_subtitles(),
             captures_since_prune: 0,
             poll_every_ticks,
+            pin_item: MenuItem::new(
+                "Pin Current Clipboard",
+                true,
+                Some(Accelerator::new(Some(Modifiers::META), Code::KeyP)),
+            ),
             // ⌘⌫ deletes one thing; clearing everything is deliberately a
             // bigger gesture so the two can't be confused mid-reflex.
             delete_item: MenuItem::new(
@@ -317,6 +325,7 @@ impl App {
         self.menu.append(&top_separator)?;
         separators.push(top_separator);
 
+        self.menu.append(&self.pin_item)?;
         self.menu.append(&self.delete_item)?;
 
         let mid_separator = PredefinedMenuItem::separator();
@@ -331,7 +340,8 @@ impl App {
         Ok(())
     }
 
-    /// Rebuilds the dynamic section from the most recent history entries.
+    /// Rebuilds the dynamic section: pinned entries and recent history, or
+    /// search results when a query is active.
     fn rebuild(&mut self) -> Result<()> {
         // The dynamic section always occupies the top of the menu, so dropping
         // the previous batch is just removing that many items from position 0.
@@ -344,10 +354,22 @@ impl App {
         // instead of parsing the whole log on every capture.
         let entries = history::read_tail(MENU_ENTRIES)?;
         self.build_recent_rows(&entries)?;
+
+        self.refresh_pin_item();
         Ok(())
     }
 
     fn build_recent_rows(&mut self, entries: &[HistoryEntry]) -> Result<()> {
+        let pinned = pins::read_pins()?;
+
+        if !pinned.is_empty() {
+            self.push_label("Pinned")?;
+            for (position, pin) in pinned.iter().enumerate() {
+                self.push_row(pin, None, None, digit_accelerator(position, true))?;
+            }
+            self.push_separator()?;
+        }
+
         if entries.is_empty() {
             self.push_label("No clipboard history yet")?;
             return Ok(());
@@ -376,6 +398,13 @@ impl App {
         let item = MenuItem::new(text, false, None);
         self.insert_at_end_of_top(&item)?;
         self.top.push(TopItem::Label(item));
+        Ok(())
+    }
+
+    fn push_separator(&mut self) -> Result<()> {
+        let separator = PredefinedMenuItem::separator();
+        self.insert_at_end_of_top(&separator)?;
+        self.top.push(TopItem::Separator(separator));
         Ok(())
     }
 
@@ -441,6 +470,30 @@ impl App {
             return;
         };
         item.setImage(Some(icon));
+    }
+
+    /// The pin command reads as pin or unpin depending on what's on the
+    /// clipboard right now, which avoids needing a control on every row.
+    fn refresh_pin_item(&self) {
+        let Some(current) = self.last.as_deref() else {
+            self.pin_item.set_enabled(false);
+            return;
+        };
+
+        match pins::is_pinned(current) {
+            Ok(true) => {
+                self.pin_item.set_text("Unpin Current Clipboard");
+                self.pin_item.set_enabled(true);
+            }
+            Ok(false) => {
+                self.pin_item.set_text("Pin Current Clipboard");
+                self.pin_item.set_enabled(true);
+            }
+            Err(e) => {
+                eprintln!("clipvault: could not read pins: {e}");
+                self.pin_item.set_enabled(false);
+            }
+        }
     }
 
     fn tick(&mut self) {
@@ -510,6 +563,12 @@ impl App {
                 continue;
             }
 
+            if event.id == *self.pin_item.id() {
+                self.toggle_pin_for_current();
+                self.refresh();
+                continue;
+            }
+
             if event.id == *self.delete_item.id() {
                 self.delete_current();
                 continue;
@@ -538,7 +597,18 @@ impl App {
             Ok(()) => self.last = Some(content),
             Err(e) => eprintln!("clipvault: could not set the clipboard: {e}"),
         }
+        // The pin command's label tracks the clipboard, so it's stale now.
         self.refresh();
+    }
+
+    fn toggle_pin_for_current(&mut self) {
+        let Some(current) = self.last.clone() else {
+            return;
+        };
+
+        if let Err(e) = pins::toggle_pin(&current) {
+            eprintln!("clipvault: could not update pins: {e}");
+        }
     }
 
     /// Removes the entry currently on the clipboard, then moves to the next one
@@ -552,6 +622,11 @@ impl App {
             eprintln!("clipvault: could not delete entry: {e}");
             return;
         }
+        // A pin pointing at a deleted entry would keep offering it back.
+        if let Err(e) = pins::remove_pin(&current) {
+            eprintln!("clipvault: could not update pins: {e}");
+        }
+
         // Promote the next newest onto the clipboard.
         match history::read_tail(1) {
             Ok(entries) => match entries.into_iter().next_back() {

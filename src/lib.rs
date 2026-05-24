@@ -4,6 +4,7 @@ pub mod display;
 pub mod history;
 pub mod hotkey;
 pub mod lock;
+pub mod pins;
 pub mod poll;
 pub mod source;
 pub mod watch;

@@ -52,7 +52,7 @@ pub(crate) fn restrict(path: &std::path::Path, mode: u32) {
 #[cfg(not(unix))]
 pub(crate) fn restrict(_path: &std::path::Path, _mode: u32) {}
 
-/// Resolves ~/.clipvault, creating it if needed.
+/// Resolves ~/.clipvault, creating it if needed. Shared with [`crate::pins`].
 pub(crate) fn clipvault_dir() -> Result<PathBuf> {
     let mut dir = dirs::home_dir().ok_or("could not resolve home directory")?;
     dir.push(".clipvault");
