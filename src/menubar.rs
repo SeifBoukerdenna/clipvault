@@ -365,7 +365,14 @@ impl App {
         if !pinned.is_empty() {
             self.push_label("Pinned")?;
             for (position, pin) in pinned.iter().enumerate() {
-                self.push_row(pin, None, None, digit_accelerator(position, true))?;
+                // The pin carries its own source, so this no longer costs a
+                // scan of the history per pinned row.
+                self.push_row(
+                    &pin.content,
+                    pin.source_bundle_id.as_deref(),
+                    pin.source.clone(),
+                    digit_accelerator(position, true),
+                )?;
             }
             self.push_separator()?;
         }
@@ -601,12 +608,28 @@ impl App {
         self.refresh();
     }
 
+    /// Pins whatever is on the clipboard, carrying over its recorded source so
+    /// the pinned row can show the same icon and app name.
     fn toggle_pin_for_current(&mut self) {
         let Some(current) = self.last.clone() else {
             return;
         };
 
-        if let Err(e) = pins::toggle_pin(&current) {
+        // The whole history, not just the menu's window: the palette can reach
+        // an entry from months ago, and pinning it there would otherwise lose
+        // the app name and icon.
+        let entry = history::read_history()
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .find(|e| e.content == current);
+
+        let (name, bundle) = match &entry {
+            Some(e) => (e.source.clone(), e.source_bundle_id.clone()),
+            None => (None, None),
+        };
+
+        if let Err(e) = pins::toggle_pin(&current, name.as_deref(), bundle.as_deref()) {
             eprintln!("clipvault: could not update pins: {e}");
         }
     }
