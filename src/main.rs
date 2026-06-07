@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use clipvault::{Result, display, history, poll, watch};
+use clipvault::{Result, display, fuzzy, history, poll, watch};
 
 const DEFAULT_LIST_COUNT: usize = 20;
 
@@ -98,22 +98,27 @@ fn search(args: &[String]) -> Result<()> {
         _ => return Err("`search` takes a single term — quote it if it contains spaces".into()),
     };
 
-    let needle = term.to_lowercase();
     let entries = history::read_history()?;
 
-    let matches: Vec<(usize, &history::HistoryEntry)> = entries
+    // Fuzzy, so the CLI and the menu bar palette agree on what a search means.
+    // Every substring match is also a subsequence match, so this only ever adds
+    // results to what the old substring search found.
+    let mut scored: Vec<(i32, usize)> = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| entry.content.to_lowercase().contains(&needle))
+        .filter_map(|(index, entry)| fuzzy::score(term, &entry.content).map(|s| (s, index)))
         .collect();
 
-    if matches.is_empty() {
+    // Best match first; ties keep history order.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+
+    if scored.is_empty() {
         println!("no matches for '{term}'");
         return Ok(());
     }
 
-    for (index, entry) in matches {
-        println!("{}", display::format_entry(index + 1, entry));
+    for (_, index) in &scored {
+        println!("{}", display::format_entry(index + 1, &entries[*index]));
     }
 
     Ok(())
