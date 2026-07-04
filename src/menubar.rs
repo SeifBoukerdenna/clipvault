@@ -18,6 +18,7 @@ use std::rc::Rc;
 
 use arboard::Clipboard;
 use block2::StackBlock;
+use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 // `muda` and `global-hotkey` re-export these from the same `keyboard-types`
 // version, so one import covers both the menu accelerators and the hotkey.
@@ -27,21 +28,22 @@ use objc2::rc::Retained;
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSBox, NSBoxType, NSColor, NSControlStateValueOff, NSControlStateValueOn,
-    NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSFont,
-    NSImage, NSImageView, NSMenu, NSMenuItem, NSModalResponse, NSPanel, NSScreen, NSStatusBar,
-    NSStatusItem, NSTextAlignment, NSTextField, NSVariableStatusItemLength, NSView,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
-    NSWindowButton, NSWindowDidResignKeyNotification, NSWindowStyleMask, NSWindowTitleVisibility,
-    NSWorkspace,
+    NSBackingStoreType, NSBezelStyle, NSBox, NSBoxType, NSButton, NSColor, NSControlStateValueOff,
+    NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
+    NSFloatingWindowLevel, NSFont, NSImage, NSImageView, NSMenu, NSMenuItem, NSModalResponse,
+    NSPanel, NSPopUpButton, NSScreen, NSStatusBar, NSStatusItem, NSTextAlignment, NSTextField,
+    NSVariableStatusItemLength, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSVisualEffectView, NSWindowButton, NSWindowDidResignKeyNotification,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize, NSString, NSTimer,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
+use crate::config::Config;
 use crate::history::HistoryEntry;
-use crate::{Result, display, fuzzy, history, hotkey, lock, pins, poll, source};
+use crate::{Result, config, display, fuzzy, history, hotkey, lock, pins, poll, source};
 
 /// Result rows the search palette shows at once. Results beyond this scroll.
 const PALETTE_ROWS: usize = 8;
@@ -65,15 +67,6 @@ const PALETTE_ROW_INSET: f64 = 10.0;
 const PALETTE_TEXT_LEFT: f64 = PALETTE_PADDING + PALETTE_ICON + PALETTE_ICON_GAP;
 /// Preview width inside the palette, which is wider than the menu.
 const PALETTE_PREVIEW_WIDTH: usize = 82;
-
-/// Milliseconds between clipboard polls.
-const POLL_INTERVAL_MS: u64 = 750;
-
-/// How many recent entries the menu lists.
-const MENU_ENTRIES: usize = 15;
-
-/// Entries kept on disk; older ones are pruned as new ones arrive.
-const HISTORY_LIMIT: usize = 1000;
 
 /// Captures between prunes. Pruning rewrites the whole file, so it shouldn't
 /// ride along on every copy.
@@ -109,6 +102,8 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
 
+    let settings = config::load();
+
     let app = NSApplication::sharedApplication(mtm);
     // Accessory = lives in the menu bar with no Dock icon and no ⌘-Tab entry.
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -129,10 +124,19 @@ pub fn run() -> Result<()> {
     // Registered for the process lifetime; dropping the manager unregisters it,
     // so `App` holds onto it.
     let hotkeys = GlobalHotKeyManager::new()?;
-    let hotkey = hotkey::parse(hotkey::DEFAULT);
+    let hotkey = hotkey::parse(&settings.hotkey);
     hotkeys.register(hotkey)?;
 
-    let mut state = App::new(mtm, status_item, menu, ns_menu, hotkeys, instance)?;
+    let mut state = App::new(
+        mtm,
+        status_item,
+        menu,
+        ns_menu,
+        hotkeys,
+        hotkey,
+        settings,
+        instance,
+    )?;
     state.build_footer()?;
     // Trim anything left over from a previous run before the first menu build.
     state.prune_now();
@@ -609,6 +613,24 @@ impl PaletteView {
     }
 }
 
+/// What the preferences sheet was dismissed with.
+enum PrefsOutcome {
+    Cancelled,
+    Save(Config),
+}
+
+/// Modal result codes for the preferences window.
+const PREFS_SAVE: NSModalResponse = 1;
+const PREFS_CANCEL: NSModalResponse = 0;
+
+/// Whether a window-relative point falls inside a view's frame.
+fn point_in(point: NSPoint, frame: NSRect) -> bool {
+    point.x >= frame.origin.x
+        && point.x <= frame.origin.x + frame.size.width
+        && point.y >= frame.origin.y
+        && point.y <= frame.origin.y + frame.size.height
+}
+
 struct App {
     mtm: MainThreadMarker,
     /// Also keeps the icon in the menu bar: dropping the status item removes it.
@@ -629,6 +651,8 @@ struct App {
     /// which was the largest single cost of opening the palette.
     palette: Option<(Retained<NSPanel>, Rc<PaletteView>)>,
 
+    settings: Config,
+    hotkey: HotKey,
     supports_subtitles: bool,
     captures_since_prune: u32,
     poll_every_ticks: u32,
@@ -636,15 +660,14 @@ struct App {
     search_item: MenuItem,
     pin_item: MenuItem,
     delete_item: MenuItem,
+    prefs_item: MenuItem,
     login_item: CheckMenuItem,
     clear_item: MenuItem,
     quit_item: MenuItem,
     /// Footer separators, retained for the same reason as `top`.
     _footer_separators: Vec<PredefinedMenuItem>,
 
-    /// Held only so the shortcut stays registered for the life of the app;
-    /// dropping the manager unregisters it.
-    _hotkeys: GlobalHotKeyManager,
+    hotkeys: GlobalHotKeyManager,
     /// Held only so the single-instance lock lives as long as the app.
     _instance: lock::InstanceLock,
 }
@@ -657,6 +680,8 @@ impl App {
         menu: Menu,
         ns_menu: Retained<NSMenu>,
         hotkeys: GlobalHotKeyManager,
+        hotkey: HotKey,
+        settings: Config,
         instance: lock::InstanceLock,
     ) -> Result<Self> {
         let mut clipboard = Clipboard::new()?;
@@ -664,7 +689,7 @@ impl App {
         // whatever happened to be copied beforehand.
         let last = poll::fetch_clipboard(&mut clipboard).ok();
 
-        let poll_every_ticks = (POLL_INTERVAL_MS / TICK_MS).max(1) as u32;
+        let poll_every_ticks = (settings.poll_interval_ms / TICK_MS).max(1) as u32;
 
         Ok(Self {
             mtm,
@@ -677,6 +702,8 @@ impl App {
             top: Vec::new(),
             icons: HashMap::new(),
             palette: None,
+            settings,
+            hotkey,
             supports_subtitles: supports_subtitles(),
             captures_since_prune: 0,
             poll_every_ticks,
@@ -697,6 +724,11 @@ impl App {
                 true,
                 Some(Accelerator::new(Some(Modifiers::META), Code::Backspace)),
             ),
+            prefs_item: MenuItem::new(
+                "Preferences…",
+                true,
+                Some(Accelerator::new(Some(Modifiers::META), Code::Comma)),
+            ),
             login_item: CheckMenuItem::new("Launch at Login", true, login_enabled(), None),
             // ⌘⌫ to clear and ⌘Q to quit are the system-wide idioms for
             // "delete this" and "quit", so they need no explaining.
@@ -714,7 +746,7 @@ impl App {
                 Some(Accelerator::new(Some(Modifiers::META), Code::KeyQ)),
             ),
             _footer_separators: Vec::new(),
-            _hotkeys: hotkeys,
+            hotkeys,
             _instance: instance,
         })
     }
@@ -736,6 +768,7 @@ impl App {
         self.menu.append(&mid_separator)?;
         separators.push(mid_separator);
 
+        self.menu.append(&self.prefs_item)?;
         self.menu.append(&self.login_item)?;
         self.menu.append(&self.clear_item)?;
         self.menu.append(&self.quit_item)?;
@@ -757,7 +790,7 @@ impl App {
         // The menu shows a fixed handful, so read only that many from the end
         // instead of parsing the whole log on every capture. Searching is the
         // palette's job now, and it reads the full history only when opened.
-        let entries = history::read_tail(MENU_ENTRIES)?;
+        let entries = history::read_tail(self.settings.menu_entries)?;
         self.build_recent_rows(&entries)?;
 
         self.refresh_pin_item();
@@ -993,6 +1026,11 @@ impl App {
                 continue;
             }
 
+            if event.id == *self.prefs_item.id() {
+                self.edit_preferences();
+                continue;
+            }
+
             self.handle_top_click(&event.id);
         }
     }
@@ -1081,7 +1119,7 @@ impl App {
 
     fn prune_now(&mut self) {
         self.captures_since_prune = 0;
-        match history::prune(HISTORY_LIMIT) {
+        match history::prune(self.settings.history_limit) {
             Ok(0) => {}
             Ok(n) => eprintln!("clipvault: pruned {n} old entries"),
             Err(e) => eprintln!("clipvault: could not prune history: {e}"),
@@ -1092,6 +1130,260 @@ impl App {
         if let Err(e) = self.rebuild() {
             eprintln!("clipvault: could not refresh the menu: {e}");
         }
+    }
+
+    /// A modal preferences sheet built from labelled text fields.
+    ///
+    /// A real preferences window would mean a custom `NSWindowController` and
+    /// an Objective-C class for the control actions; an alert with an accessory
+    /// view gets the same four settings edited with a fraction of the surface.
+    /// Runs the preferences sheet, reopening it after a shortcut is recorded so
+    /// the recorder feels like a step inside the sheet rather than a detour.
+    fn edit_preferences(&mut self) {
+        if let PrefsOutcome::Save(updated) = self.show_preferences(self.settings.hotkey.clone()) {
+            self.apply_settings(updated);
+        }
+    }
+
+    /// A real preferences window rather than an alert.
+    ///
+    /// An `NSAlert` brings an icon, a message, and a vertical stack of buttons,
+    /// which is why the old one read as a warning dialog and truncated its own
+    /// labels. This lays out a proper two-column form and puts Cancel/Save
+    /// where macOS puts them.
+    ///
+    /// Buttons are hit-tested through the event monitor instead of target/action,
+    /// which avoids defining an Objective-C class for three callbacks.
+    fn show_preferences(&self, pending_hotkey: String) -> PrefsOutcome {
+        let app = NSApplication::sharedApplication(self.mtm);
+        app.activate();
+
+        let rows: [(&str, String); 3] = [
+            ("Poll interval", self.settings.poll_interval_ms.to_string()),
+            ("Entries in menu", self.settings.menu_entries.to_string()),
+            ("History limit", self.settings.history_limit.to_string()),
+        ];
+
+        const W: f64 = 500.0;
+        const PAD: f64 = 22.0;
+        const LABEL_W: f64 = 150.0;
+        const FIELD_W: f64 = 110.0;
+        const ROW_H: f64 = 34.0;
+        const CTRL_X: f64 = PAD + LABEL_W + 12.0;
+        // shortcut + 3 numeric rows + opens row, then the button bar
+        let body = ROW_H * 5.0;
+        let height = PAD + 44.0 + body + PAD;
+
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(self.mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, height)),
+            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        panel.setTitle(&NSString::from_str("ClipVault Preferences"));
+
+        let content = NSView::initWithFrame(
+            NSView::alloc(self.mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, height)),
+        );
+
+        let label = |text: &str, y: f64| {
+            let l = NSTextField::labelWithString(&NSString::from_str(text), self.mtm);
+            l.setFrame(NSRect::new(
+                NSPoint::new(PAD, y),
+                NSSize::new(LABEL_W, 18.0),
+            ));
+            // Right-aligned against the controls, the way system forms read.
+            l.setAlignment(TEXT_RIGHT);
+            l.setTextColor(Some(&NSColor::labelColor()));
+            l
+        };
+
+        let mut y = height - PAD - 26.0;
+
+        content.addSubview(&label("Shortcut", y + 3.0));
+        let shortcut = NSTextField::initWithFrame(
+            NSTextField::alloc(self.mtm),
+            NSRect::new(NSPoint::new(CTRL_X, y), NSSize::new(FIELD_W + 40.0, 22.0)),
+        );
+        shortcut.setStringValue(&NSString::from_str(&pending_hotkey));
+        content.addSubview(&shortcut);
+
+        // Show what the typed spec resolves to, so a typo is visible before
+        // saving rather than after the shortcut quietly stops working.
+        let resolved = NSTextField::labelWithString(
+            &NSString::from_str(&format!(
+                "{}   e.g. cmd+shift+V",
+                hotkey::describe(&pending_hotkey)
+            )),
+            self.mtm,
+        );
+        resolved.setFrame(NSRect::new(
+            NSPoint::new(CTRL_X + FIELD_W + 50.0, y + 3.0),
+            NSSize::new(W - CTRL_X - FIELD_W - 50.0 - PAD, 18.0),
+        ));
+        resolved.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        resolved.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        content.addSubview(&resolved);
+
+        // Numeric fields.
+        let mut fields = Vec::new();
+        for (index, (text, value)) in rows.iter().enumerate() {
+            y -= ROW_H;
+            content.addSubview(&label(text, y + 3.0));
+
+            let field = NSTextField::initWithFrame(
+                NSTextField::alloc(self.mtm),
+                NSRect::new(NSPoint::new(CTRL_X, y), NSSize::new(FIELD_W, 22.0)),
+            );
+            field.setStringValue(&NSString::from_str(value));
+            content.addSubview(&field);
+            fields.push(field);
+
+            // A unit or hint beside the field, so the labels stay short.
+            let hint = match index {
+                0 => "milliseconds",
+                1 => "rows",
+                _ => "entries (0 keeps everything)",
+            };
+            let h = NSTextField::labelWithString(&NSString::from_str(hint), self.mtm);
+            h.setFrame(NSRect::new(
+                NSPoint::new(CTRL_X + FIELD_W + 10.0, y + 3.0),
+                NSSize::new(W - CTRL_X - FIELD_W - 10.0 - PAD, 18.0),
+            ));
+            h.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+            h.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            content.addSubview(&h);
+        }
+
+        // Popup instead of asking the user to type "menu" or "search".
+        y -= ROW_H;
+        content.addSubview(&label("Shortcut opens", y + 3.0));
+        let opens = NSPopUpButton::initWithFrame_pullsDown(
+            NSPopUpButton::alloc(self.mtm),
+            NSRect::new(NSPoint::new(CTRL_X, y - 2.0), NSSize::new(150.0, 26.0)),
+            false,
+        );
+        opens.addItemWithTitle(&NSString::from_str("Menu"));
+        opens.addItemWithTitle(&NSString::from_str("Search"));
+        opens.selectItemAtIndex(if self.settings.hotkey_opens == config::OPENS_SEARCH {
+            1
+        } else {
+            0
+        });
+        content.addSubview(&opens);
+
+        // Cancel then Save, right-aligned — macOS puts the default rightmost.
+        let save = NSButton::initWithFrame(
+            NSButton::alloc(self.mtm),
+            NSRect::new(
+                NSPoint::new(W - PAD - 100.0, PAD - 6.0),
+                NSSize::new(100.0, 30.0),
+            ),
+        );
+        save.setTitle(&NSString::from_str("Save"));
+        save.setBezelStyle(NSBezelStyle::Push);
+        save.setKeyEquivalent(&NSString::from_str("\r"));
+        content.addSubview(&save);
+        let save_frame = save.frame();
+
+        let cancel = NSButton::initWithFrame(
+            NSButton::alloc(self.mtm),
+            NSRect::new(
+                NSPoint::new(W - PAD - 212.0, PAD - 6.0),
+                NSSize::new(100.0, 30.0),
+            ),
+        );
+        cancel.setTitle(&NSString::from_str("Cancel"));
+        cancel.setBezelStyle(NSBezelStyle::Push);
+        content.addSubview(&cancel);
+        let cancel_frame = cancel.frame();
+
+        panel.setContentView(Some(&content));
+        panel.center();
+        if let Some(first) = fields.first() {
+            panel.makeFirstResponder(Some(first));
+        }
+
+        let monitor = {
+            let app = app.clone();
+            let block = StackBlock::new(move |event: NonNull<NSEvent>| {
+                let raw = event;
+                // SAFETY: AppKit hands us a live event for the handler's duration.
+                let event = unsafe { raw.as_ref() };
+
+                if event.r#type() == NSEventType::LeftMouseDown {
+                    let point = event.locationInWindow();
+                    if point_in(point, save_frame) {
+                        app.stopModalWithCode(PREFS_SAVE);
+                        return std::ptr::null_mut();
+                    }
+                    if point_in(point, cancel_frame) {
+                        app.stopModalWithCode(PREFS_CANCEL);
+                        return std::ptr::null_mut();
+                    }
+                    // Anything else (a text field, the popup) is handled normally.
+                    return raw.as_ptr();
+                }
+
+                match event.keyCode() {
+                    36 | 76 => {
+                        app.stopModalWithCode(PREFS_SAVE);
+                        std::ptr::null_mut()
+                    }
+                    53 => {
+                        app.stopModalWithCode(PREFS_CANCEL);
+                        std::ptr::null_mut()
+                    }
+                    // Everything else reaches the field being typed into.
+                    _ => raw.as_ptr(),
+                }
+            })
+            .copy();
+
+            // SAFETY: removed before this function returns.
+            unsafe {
+                NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                    NSEventMask::KeyDown | NSEventMask::LeftMouseDown,
+                    &block,
+                )
+            }
+        };
+
+        panel.makeKeyAndOrderFront(None);
+        let response = app.runModalForWindow(&panel);
+
+        let read = |index: usize| fields[index].stringValue().to_string();
+        let defaults = Config::default();
+        let edited = Config {
+            hotkey: shortcut.stringValue().to_string(),
+            // A field typed into nonsense keeps the current value rather than
+            // silently snapping to a default the user didn't ask for.
+            poll_interval_ms: read(0)
+                .trim()
+                .parse()
+                .unwrap_or(self.settings.poll_interval_ms),
+            menu_entries: read(1).trim().parse().unwrap_or(self.settings.menu_entries),
+            history_limit: read(2).trim().parse().unwrap_or(defaults.history_limit),
+            hotkey_opens: if opens.indexOfSelectedItem() == 1 {
+                config::OPENS_SEARCH.to_string()
+            } else {
+                config::OPENS_MENU.to_string()
+            },
+        };
+
+        panel.orderOut(None);
+        if let Some(monitor) = monitor {
+            // SAFETY: the token the matching add call returned.
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
+
+        if response != PREFS_SAVE {
+            return PrefsOutcome::Cancelled;
+        }
+
+        PrefsOutcome::Save(edited.sanitized())
     }
 
     /// A live fuzzy-search palette: type and the list filters as you go, ↑/↓
@@ -1492,6 +1784,61 @@ impl App {
         (panel, view)
     }
 
+    fn apply_settings(&mut self, updated: Config) {
+        if updated == self.settings {
+            return;
+        }
+
+        if updated.hotkey != self.settings.hotkey {
+            let next = hotkey::parse(&updated.hotkey);
+            // Release the old binding first: registering a shortcut the system
+            // still has attached to us would just fail.
+            if let Err(e) = self.hotkeys.unregister(self.hotkey) {
+                eprintln!("clipvault: could not release the old shortcut: {e}");
+            }
+            match self.hotkeys.register(next) {
+                Ok(()) => self.hotkey = next,
+                Err(e) => {
+                    eprintln!("clipvault: could not register {}: {e}", updated.hotkey);
+                    // Put the previous one back so the app doesn't end up with
+                    // no way to open at all.
+                    let _ = self.hotkeys.register(self.hotkey);
+
+                    // Say so. A shortcut another app already owns would
+                    // otherwise appear to save and then quietly not work.
+                    let alert = NSAlert::new(self.mtm);
+                    alert.setMessageText(&NSString::from_str("Shortcut unavailable"));
+                    alert.setInformativeText(&NSString::from_str(&format!(
+                        "{} could not be registered — another app is probably using it. Keeping {}.",
+                        hotkey::describe(&updated.hotkey),
+                        hotkey::describe(&self.settings.hotkey),
+                    )));
+                    alert.runModal();
+
+                    // Keep the stored setting matching what is actually bound.
+                    let mut updated = updated;
+                    updated.hotkey = self.settings.hotkey.clone();
+                    return self.finish_settings(updated);
+                }
+            }
+        }
+
+        self.finish_settings(updated);
+    }
+
+    fn finish_settings(&mut self, updated: Config) {
+        self.poll_every_ticks = (updated.poll_interval_ms / TICK_MS).max(1) as u32;
+        self.ticks_to_poll = self.poll_every_ticks;
+        self.settings = updated;
+
+        if let Err(e) = config::save(&self.settings) {
+            eprintln!("clipvault: could not save preferences: {e}");
+        }
+
+        self.prune_now();
+        self.refresh();
+    }
+
     fn toggle_login(&self) {
         let service = unsafe { SMAppService::mainAppService() };
         let currently_on = unsafe { service.status() }.0 == SMAppServiceStatus::Enabled.0;
@@ -1529,7 +1876,15 @@ impl App {
             return;
         }
 
-        if let Some(button) = self._status_item.button(self.mtm) {
+        // Which surface the shortcut opens is a preference, not a decision to
+        // make for the user: going through the menu costs a second keystroke
+        // (⌘F) before you can type, but the menu is also where pinning,
+        // deleting and preferences live.
+        if self.settings.hotkey_opens == config::OPENS_SEARCH {
+            if let Some(content) = self.search_palette() {
+                self.take(content);
+            }
+        } else if let Some(button) = self._status_item.button(self.mtm) {
             // SAFETY: main thread, where AppKit requires all UI work. Clicking
             // the button is what makes the status item drop its menu.
             unsafe { button.performClick(None) };

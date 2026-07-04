@@ -1,5 +1,6 @@
 //! Shared core behind the `clipvault` CLI and the `clipvault-menubar` app.
 
+pub mod config;
 pub mod display;
 pub mod fuzzy;
 pub mod history;

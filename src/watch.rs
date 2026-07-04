@@ -6,15 +6,9 @@ use std::time::Duration;
 
 use arboard::Clipboard;
 
-use crate::{Result, display, history, lock, poll, source};
+use crate::{Result, config, display, history, lock, poll, source};
 
-/// Milliseconds between clipboard polls.
-const POLL_INTERVAL: Duration = Duration::from_millis(750);
-
-/// Entries kept on disk; older ones are pruned as new ones arrive.
-const HISTORY_LIMIT: usize = 1000;
-
-/// Captures between prunes.
+/// Captures between prunes, matching the menu bar app.
 const PRUNE_EVERY_CAPTURES: u32 = 25;
 
 /// Slice length for the interruptible sleep, so Ctrl+C is acted on promptly
@@ -31,6 +25,11 @@ pub fn run() -> Result<()> {
                 .into(),
         );
     };
+
+    // The same settings the menu bar app uses; running the two watchers with
+    // different intervals or retention would be surprising.
+    let settings = config::load();
+    let poll_interval = Duration::from_millis(settings.poll_interval_ms);
 
     let mut clipboard = Clipboard::new()?;
 
@@ -51,12 +50,12 @@ pub fn run() -> Result<()> {
     let mut since_prune = 0u32;
 
     // Trim anything a previous run left over the limit.
-    if let Err(e) = history::prune(HISTORY_LIMIT) {
+    if let Err(e) = history::prune(settings.history_limit) {
         eprintln!("clipvault: could not prune history: {e}");
     }
 
     while running.load(Ordering::SeqCst) {
-        sleep_interruptibly(POLL_INTERVAL, &running);
+        sleep_interruptibly(poll_interval, &running);
         if !running.load(Ordering::SeqCst) {
             break;
         }
@@ -87,7 +86,7 @@ pub fn run() -> Result<()> {
                 since_prune += 1;
                 if since_prune >= PRUNE_EVERY_CAPTURES {
                     since_prune = 0;
-                    if let Err(e) = history::prune(HISTORY_LIMIT) {
+                    if let Err(e) = history::prune(settings.history_limit) {
                         eprintln!("clipvault: could not prune history: {e}");
                     }
                 }
