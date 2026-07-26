@@ -77,9 +77,11 @@ const PRUNE_EVERY_CAPTURES: u32 = 25;
 const MENU_PREVIEW_WIDTH: usize = 60;
 
 /// Timer period, and the ceiling on how long a hotkey press or menu click waits
-/// to be noticed.
-const TICK_SECONDS: f64 = 0.05;
-const TICK_MS: u64 = 50;
+/// to be noticed. At the old 50ms this was the dominant source of lag — the work
+/// per tick is two channel polls, so the display refresh rate is a much better
+/// trade than the wakeup saving.
+const TICK_SECONDS: f64 = 0.016;
+const TICK_MS: u64 = 16;
 
 /// The SF Symbol drawn in the menu bar, with a fallback for older macOS.
 const ICON_SYMBOL: &str = "list.clipboard";
