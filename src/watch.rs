@@ -76,6 +76,13 @@ pub fn run() -> Result<()> {
             continue;
         }
 
+        // Passwords and other secrets are flagged on the pasteboard itself.
+        // `last` still advances, so this isn't re-examined every poll.
+        if poll::is_concealed() {
+            last = Some(text);
+            continue;
+        }
+
         match history::append_history(&text, source::frontmost().as_ref()) {
             Ok(()) => {
                 captured += 1;

@@ -971,6 +971,12 @@ impl App {
 
         self.last = Some(text.clone());
 
+        // Passwords and other secrets are flagged on the pasteboard itself.
+        // `last` is already updated, so this isn't re-examined every poll.
+        if poll::is_concealed() {
+            return;
+        }
+
         match history::append_history(&text, source::frontmost().as_ref()) {
             Ok(()) => {
                 // Pruning rewrites the whole file, so it happens on a cadence
