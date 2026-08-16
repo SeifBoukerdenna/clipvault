@@ -79,3 +79,8 @@ features = [
     "NSWorkspace",
 ]
 
+# Used only by examples/winlist.rs, which finds the on-screen window id for a
+# menu so screenshots can capture it without grabbing the whole desktop.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-graphics = "0.3.2"
+objc2-core-foundation = "0.3.2"
