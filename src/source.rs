@@ -41,3 +41,65 @@ pub fn frontmost() -> Option<Source> {
 pub fn frontmost() -> Option<Source> {
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named(name: &str, bundle: &str) -> Source {
+        Source {
+            name: Some(name.to_string()),
+            bundle_id: Some(bundle.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_source_with_neither_field_is_empty() {
+        assert!(Source::default().is_empty());
+    }
+
+    #[test]
+    fn either_field_alone_is_enough_to_be_useful() {
+        // A name with no bundle id still labels the row; a bundle id with no
+        // name still finds the icon. Only both missing is worth discarding.
+        assert!(
+            !Source {
+                name: Some("Safari".to_string()),
+                bundle_id: None,
+            }
+            .is_empty()
+        );
+        assert!(
+            !Source {
+                name: None,
+                bundle_id: Some("com.apple.Safari".to_string()),
+            }
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_fully_populated_source_is_not_empty() {
+        assert!(!named("Safari", "com.apple.Safari").is_empty());
+    }
+
+    #[test]
+    fn sources_compare_by_value() {
+        // The menu dedupes and looks up icons by source, so equality has to be
+        // structural rather than identity.
+        assert_eq!(
+            named("Safari", "com.apple.Safari"),
+            named("Safari", "com.apple.Safari")
+        );
+        assert_ne!(
+            named("Safari", "com.apple.Safari"),
+            named("Notes", "com.apple.Notes")
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn there_is_no_frontmost_app_to_find_off_macos() {
+        assert!(frontmost().is_none());
+    }
+}

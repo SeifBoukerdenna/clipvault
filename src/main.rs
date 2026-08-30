@@ -152,3 +152,53 @@ fn copy(args: &[String]) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_arguments_means_the_default_count() {
+        assert_eq!(parse_count(&[]).unwrap(), DEFAULT_LIST_COUNT);
+    }
+
+    #[test]
+    fn both_spellings_of_the_flag_are_accepted() {
+        assert_eq!(parse_count(&args(&["-n", "5"])).unwrap(), 5);
+        assert_eq!(parse_count(&args(&["--number", "5"])).unwrap(), 5);
+    }
+
+    #[test]
+    fn a_flag_with_no_value_is_an_error() {
+        assert!(parse_count(&args(&["-n"])).is_err());
+    }
+
+    #[test]
+    fn a_non_numeric_count_is_an_error() {
+        assert!(parse_count(&args(&["-n", "twenty"])).is_err());
+        assert!(parse_count(&args(&["-n", "-3"])).is_err());
+    }
+
+    #[test]
+    fn an_unrecognised_argument_is_an_error() {
+        // Better than ignoring it: a silently dropped flag looks like the
+        // command ran and did the wrong thing.
+        assert!(parse_count(&args(&["--verbose"])).is_err());
+        assert!(parse_count(&args(&["20"])).is_err());
+    }
+
+    #[test]
+    fn the_last_flag_wins_if_it_is_given_twice() {
+        assert_eq!(parse_count(&args(&["-n", "5", "-n", "9"])).unwrap(), 9);
+    }
+
+    #[test]
+    fn zero_is_a_valid_count() {
+        // `list -n 0` printing nothing is a reasonable thing to ask for.
+        assert_eq!(parse_count(&args(&["-n", "0"])).unwrap(), 0);
+    }
+}
