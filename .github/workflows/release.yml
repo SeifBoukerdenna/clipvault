@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build ClipVault.zip
+        # No Developer ID certificate in CI, so release.sh ad-hoc signs. The
+        # README tells people how to get past Gatekeeper.
+        run: ./scripts/release.sh
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ClipVault.zip
+          generate_release_notes: true
