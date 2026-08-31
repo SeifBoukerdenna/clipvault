@@ -13,13 +13,9 @@ code anywhere in the project — see [PRIVACY.md](PRIVACY.md).
 Download `ClipVault.zip` from the [latest release][releases], unzip it, and drag
 `ClipVault.app` into `/Applications`.
 
-The first launch needs one extra step, because the app isn't signed with a paid
-Apple Developer certificate: **right-click the app → Open**, then confirm. macOS
-remembers the choice, so this is only once. If Gatekeeper refuses outright:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/ClipVault.app
-```
+The build is signed with a Developer ID certificate and notarized by Apple, with
+the ticket stapled into the bundle — so it opens on a double-click, with no
+Gatekeeper warning and no right-click dance, even on a machine that is offline.
 
 ClipVault is menu bar only — no Dock icon and no window on launch. If nothing
 seems to happen, look for the clipboard icon in the menu bar.

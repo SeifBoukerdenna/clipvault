@@ -1,32 +1,47 @@
-name: Release
+# Checks that the release path still builds when a version tag is pushed.
+#
+# It deliberately does not publish. Signing needs a Developer ID in the keychain,
+# and notarization needs credentials — neither of which a public runner has any
+# business holding, so anything built here would be ad-hoc signed and would hit
+# Gatekeeper on every machine that downloaded it. The zip attached to a release
+# is built and notarized locally with `./scripts/release.sh --notarize <profile>`
+# and uploaded by hand.
+#
+# What this catches is the release script rotting: a bundle that stops assembling,
+# or a lipo step that quietly drops an architecture.
+name: Release build
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    runs-on: macos-14
-
-    permissions:
-      contents: write
+  verify:
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install toolchain
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      - name: Build ClipVault.zip
-        # No Developer ID certificate in CI, so release.sh ad-hoc signs. The
-        # README tells people how to get past Gatekeeper.
-        run: ./scripts/release.sh
+      - name: Build the unsigned bundle
+        run: CLIPVAULT_UNIVERSAL=1 CLIPVAULT_SKIP_SIGN=1 ./scripts/bundle.sh
 
-      - name: Publish
-        uses: softprops/action-gh-release@v2
+      - name: Check both architectures made it in
+        run: |
+          lipo -info dist/ClipVault.app/Contents/MacOS/clipvault-menubar
+          lipo -info dist/ClipVault.app/Contents/MacOS/clipvault-menubar | grep -q arm64
+          lipo -info dist/ClipVault.app/Contents/MacOS/clipvault-menubar | grep -q x86_64
+
+      # Unsigned, so it is a build check rather than something to hand anyone.
+      - uses: actions/upload-artifact@v4
         with:
-          files: dist/ClipVault.zip
-          generate_release_notes: true
+          name: ClipVault-unsigned
+          path: dist/ClipVault.app

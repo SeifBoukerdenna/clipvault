@@ -44,7 +44,7 @@ if [ -n "$IDENTITY" ]; then
     SIGN_ARGS=(--force --options runtime --timestamp --sign "$IDENTITY")
 else
     echo "==> no Developer ID certificate found; falling back to an ad-hoc signature"
-    echo "    (runs locally, but recipients will hit Gatekeeper — see README)"
+    echo "    (runs locally, but recipients will hit Gatekeeper)"
     SIGN_ARGS=(--force --sign -)
 fi
 
